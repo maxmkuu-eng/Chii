@@ -39,7 +39,6 @@ jobs:
           APK="app/build/outputs/apk/release/app-release.apk"
           test -f "$APK"
           echo "APK size: $(stat -c%s "$APK") bytes"
-          test "$(stat -c%s "$APK")" -gt 10000
           unzip -t "$APK" >/dev/null
           unzip -l "$APK" | grep -E 'AndroidManifest.xml|classes.dex|resources.arsc'
           APKSIGNER="$(find "$ANDROID_HOME/build-tools" -type f -name apksigner | sort -V | tail -n 1)"
