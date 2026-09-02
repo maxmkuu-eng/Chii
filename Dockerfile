@@ -7,15 +7,13 @@ RUN npm install
 
 COPY . .
 
-RUN npm run build
+# Render provides PORT (normally 10000). The existing source uses port 3000,
+# so patch the built server inside the image to honor Render's PORT without
+# changing the application's routes or frontend/backend logic.
+RUN npm run build \
+  && sed -i 's/const PORT = 3000;/const PORT = Number(process.env.PORT) || 3000;/' dist/server.cjs
 
 ENV NODE_ENV=production
-EXPOSE 3000
+EXPOSE 10000
 
-# Render provides $PORT, while the existing MKUU server listens on 3000.
-# Keep the application unchanged and bridge Render's port to port 3000.
-RUN apt-get update \
-  && apt-get install -y --no-install-recommends socat \
-  && rm -rf /var/lib/apt/lists/*
-
-CMD ["sh", "-c", "socat TCP-LISTEN:${PORT},fork,reuseaddr TCP:127.0.0.1:3000 & exec npm start"]
+CMD ["npm", "start"]
