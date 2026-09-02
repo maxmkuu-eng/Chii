@@ -7,7 +7,9 @@ android {
     defaultConfig {
         applicationId 'com.mkuu.ai'
         minSdk 24
-        targetSdk 35
+        // Keep the WebView app out of Android 15's enforced edge-to-edge
+        // mode. The website already owns its own viewport/layout.
+        targetSdk 34
         versionCode 1
         versionName '1.0.0'
     }
