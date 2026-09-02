@@ -22,6 +22,7 @@ export interface GeneratedImageResult {
 
 const BASE_URL = (process.env.MAGIC_HOUR_API_URL || "https://api.magichour.ai/v1").replace(/\/$/, "");
 const API_KEY = process.env.MAGIC_HOUR_API_KEY;
+const REMOVE_BG_API_KEY = process.env.REMOVE_BG_API_KEY;
 let studioGallery: GeneratedImageResult[] = [];
 
 export function getGalleryImages() { return [...studioGallery]; }
@@ -82,11 +83,11 @@ function parseBase64(source: string) {
   const m = source.match(/^data:image\/([a-zA-Z0-9.+-]+);base64,(.+)$/s);
   if (!m) throw new Error("sourceImage lazima iwe data:image/...;base64,...");
   const extension = m[1].toLowerCase() === "jpeg" ? "jpg" : m[1].toLowerCase();
-  return { extension, bytes: new Uint8Array(Buffer.from(m[2], "base64")) };
+  return { extension, mimeType: `image/${extension === "jpg" ? "jpeg" : extension}`, bytes: new Uint8Array(Buffer.from(m[2], "base64")) };
 }
 
 async function uploadImage(source: string) {
-  const { extension, bytes } = parseBase64(source);
+  const { extension, mimeType, bytes } = parseBase64(source);
   const upload = await mh("/files/upload-urls", {
     method: "POST",
     body: JSON.stringify({ items: [{ extension, type: "image" }] }),
@@ -96,10 +97,52 @@ async function uploadImage(source: string) {
   const put = await fetch(item.upload_url, {
     method: "PUT",
     body: bytes as any,
-    headers: { "Content-Type": `image/${extension === "jpg" ? "jpeg" : extension}` },
+    headers: { "Content-Type": mimeType },
   });
   if (!put.ok) throw new Error(`Magic Hour image upload failed (${put.status}).`);
   return item.file_path;
+}
+
+/**
+ * Credit-safe fallback for background removal.
+ * If Magic Hour returns a credit/quota error and REMOVE_BG_API_KEY is configured,
+ * the original image is sent to remove.bg and the resulting PNG is returned as
+ * a data URL, so the UI still receives a real image instead of a text answer.
+ */
+async function removeBackgroundFallback(source: string): Promise<GeneratedImageResult> {
+  if (!REMOVE_BG_API_KEY) {
+    throw new Error("Magic Hour haina credits za kutosha. Weka REMOVE_BG_API_KEY ili Remove background itumie fallback bila kutumia Magic Hour credits.");
+  }
+
+  const { mimeType, bytes } = parseBase64(source);
+  const form = new FormData();
+  form.append("image_file", new Blob([bytes], { type: mimeType }), `mkuu-input.${mimeType === "image/jpeg" ? "jpg" : "png"}`);
+  form.append("size", "auto");
+
+  const response = await fetch("https://api.remove.bg/v1.0/removebg", {
+    method: "POST",
+    headers: { "X-Api-Key": REMOVE_BG_API_KEY },
+    body: form,
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text().catch(() => "");
+    throw new Error(`Remove.bg fallback failed (${response.status}): ${errorText.substring(0, 240)}`);
+  }
+
+  const output = Buffer.from(await response.arrayBuffer()).toString("base64");
+  return saveToGallery({
+    id: `img-removebg-${Date.now()}`,
+    url: `data:image/png;base64,${output}`,
+    prompt: "Remove background",
+    aspectRatio: "auto",
+    style: "background-removal",
+    mode: "remove_bg",
+    createdAt: new Date().toISOString(),
+    provider: "remove_bg_fallback",
+    model: "remove.bg",
+    metadata: { fallback: true },
+  });
 }
 
 function makeResult(project: any, options: ImageGenerationOptions, model: string): GeneratedImageResult {
@@ -138,9 +181,37 @@ export async function generateImage(options: ImageGenerationOptions) {
 
 export async function editImage(options: ImageGenerationOptions) {
   if (!options.sourceImage) throw new Error("sourceImage inahitajika kwa Image Studio edit.");
+
+  // Background removal is the one edit that can safely fail over to another
+  // provider because it does not require generative prompting.
+  if (options.mode === "remove_bg") {
+    try {
+      const filePath = await uploadImage(options.sourceImage);
+      const prompt = `Remove the background and keep the main subject cleanly isolated. ${options.prompt || "Preserve the subject faithfully."}`;
+      const created = await mh("/ai-image-editor", {
+        method: "POST",
+        body: JSON.stringify({
+          name: `MKUU Background Removal ${new Date().toISOString()}`,
+          image_count: 1,
+          model: "default",
+          aspect_ratio: options.aspectRatio || "auto",
+          resolution: "auto",
+          assets: { image_file_path: filePath },
+          style: { prompt },
+        }),
+      });
+      const project = await waitForCompletion(created.id);
+      return makeResult(project, options, project?.model || "default");
+    } catch (err: any) {
+      const message = String(err?.message || err || "");
+      const isCreditError = /credit|402|quota|insufficient|balance/i.test(message);
+      if (isCreditError) return removeBackgroundFallback(options.sourceImage);
+      throw err;
+    }
+  }
+
   const filePath = await uploadImage(options.sourceImage);
   let prompt = options.prompt || "Enhance this image while preserving the subject and natural appearance.";
-  if (options.mode === "remove_bg") prompt = `Remove the background and keep the main subject cleanly isolated. ${prompt}`;
   if (options.mode === "mannequin") prompt = `Place the garment on a professional tailor mannequin with a clean studio background. ${prompt}`;
   if (options.mode === "variation") prompt = `Create a refined visual variation while preserving the main subject. ${prompt}`;
   if (options.mode === "upscale") prompt = `Enhance detail and clarity while preserving the original image faithfully. ${prompt}`;
