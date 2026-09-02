@@ -16,6 +16,9 @@ android {
         release {
             minifyEnabled false
             shrinkResources false
+            // Use the runner's standard debug keystore so the generated
+            // release APK is signed and directly installable for testing.
+            signingConfig signingConfigs.debug
         }
     }
 }
