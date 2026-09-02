@@ -1,15 +1,46 @@
 @import "tailwindcss";
 
 @layer base {
+  html {
+    width: 100%;
+    min-height: 100%;
+    overflow-x: hidden;
+    -webkit-text-size-adjust: 100%;
+  }
+
   body {
+    margin: 0;
+    width: 100%;
+    min-width: 0;
+    min-height: 100dvh;
     background-color: #ffffff;
     color: #0d0d0d;
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
     overflow-x: hidden;
   }
+
+  *,
+  *::before,
+  *::after {
+    box-sizing: border-box;
+  }
+
+  button,
+  input,
+  textarea,
+  select {
+    font: inherit;
+  }
+
+  img,
+  video,
+  canvas,
+  svg {
+    max-width: 100%;
+  }
 }
 
-/* ChatGPT Sleek light scrollbar styling */
+/* ChatGPT sleek light scrollbar styling */
 ::-webkit-scrollbar {
   width: 6px;
   height: 6px;
@@ -28,3 +59,108 @@
   background: rgba(0, 0, 0, 0.3);
 }
 
+/* Mobile-first layout fixes.
+   Keep desktop untouched; on phones the navigation becomes an overlay,
+   workspace content is allowed to shrink, and controls stay inside the viewport. */
+@media (max-width: 1023px) {
+  #root {
+    width: 100%;
+    min-width: 0;
+    min-height: 100dvh;
+  }
+
+  #mkuu-navigation-drawer {
+    width: min(86vw, 320px) !important;
+    max-width: 320px;
+  }
+
+  #mkuu-drawer-backdrop {
+    touch-action: none;
+  }
+
+  main {
+    min-width: 0 !important;
+    width: 100%;
+    overflow-x: hidden !important;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  main > * {
+    min-width: 0;
+    max-width: 100%;
+  }
+
+  /* Prevent long cards, tables and code blocks from stretching the page. */
+  main table,
+  main pre,
+  main code,
+  main [class*="min-w-["] {
+    max-width: 100%;
+  }
+
+  main pre,
+  main .overflow-x-auto {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  /* Comfortable touch targets without making the UI oversized. */
+  main button,
+  #mkuu-navigation-drawer button {
+    touch-action: manipulation;
+  }
+
+  textarea,
+  input,
+  select {
+    max-width: 100%;
+  }
+}
+
+@media (max-width: 640px) {
+  /* Respect phones with a bottom gesture/navigation area. */
+  #root,
+  #root > * {
+    min-height: 100dvh;
+  }
+
+  /* Chat content gets tighter side gutters on narrow screens. */
+  main .max-w-3xl {
+    max-width: 100% !important;
+  }
+
+  /* Keep generated images/cards inside the viewport. */
+  main img,
+  main video,
+  main canvas {
+    max-width: 100% !important;
+    height: auto;
+  }
+
+  /* Prevent fixed-width form rows from forcing horizontal scrolling. */
+  main form,
+  main [role="form"] {
+    max-width: 100%;
+    min-width: 0;
+  }
+
+  /* Smaller scrollbar is less intrusive on touch devices. */
+  ::-webkit-scrollbar {
+    width: 4px;
+    height: 4px;
+  }
+}
+
+@media (max-width: 380px) {
+  #mkuu-navigation-drawer {
+    width: 90vw !important;
+  }
+}
+
+/* Avoid hover-only visual states becoming sticky on touch devices. */
+@media (hover: none) and (pointer: coarse) {
+  button,
+  a {
+    -webkit-tap-highlight-color: transparent;
+  }
+}
