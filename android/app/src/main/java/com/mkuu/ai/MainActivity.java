@@ -15,7 +15,7 @@ import android.webkit.WebView;
 import android.webkit.WebViewClient;
 
 public class MainActivity extends Activity {
-    private static final String APP_URL = "https://chii-8usm.onrender.com/";
+    private static final String APP_URL = "https://chii-0u0af.faable.link/";
     private static final int REQUEST_PERMISSIONS = 1001;
     private static final int FILE_CHOOSER = 1002;
     private WebView webView;
