@@ -11,4 +11,4 @@ http.Server.prototype.listen = function (...args) {
 };
 
 console.log(`[MKUU AI] Render startup: PORT=${process.env.PORT || "10000"}`);
-require("../../dist/server.cjs");
+require("../dist/server.cjs");
