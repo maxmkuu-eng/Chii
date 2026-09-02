@@ -1,0 +1,33 @@
+name: Fix server port
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  fix-port:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Change server fallback port to 10000
+        shell: bash
+        run: |
+          set -e
+          grep -n 'const PORT = Number(process.env.PORT)' server.ts
+          sed -i 's/const PORT = Number(process.env.PORT) || 3000;/const PORT = Number(process.env.PORT) || 10000;/' server.ts
+          grep -n 'const PORT = Number(process.env.PORT)' server.ts
+
+      - name: Commit source fix and remove one-time workflow
+        shell: bash
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add server.ts .github/workflows/fix-server-port.yml
+          git rm .github/workflows/fix-server-port.yml
+          git commit -m 'Fix Render server port to 10000'
+          git push
