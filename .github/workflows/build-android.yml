@@ -29,16 +29,27 @@ jobs:
         with:
           gradle-version: '8.9'
 
-      - name: Build release APK
-        run: gradle :app:assembleRelease --no-daemon
+      - name: Build signed release APK
+        run: gradle :app:clean :app:assembleRelease --no-daemon
 
-      - name: Verify APK
+      - name: Verify APK is genuine and signed
+        shell: bash
         run: |
-          test -f app/build/outputs/apk/release/app-release-unsigned.apk
-          unzip -l app/build/outputs/apk/release/app-release-unsigned.apk | grep -E 'AndroidManifest.xml|classes.dex|resources.arsc'
+          set -euo pipefail
+          APK="app/build/outputs/apk/release/app-release.apk"
+          test -f "$APK"
+          echo "APK size: $(stat -c%s "$APK") bytes"
+          test "$(stat -c%s "$APK")" -gt 10000
+          unzip -t "$APK" >/dev/null
+          unzip -l "$APK" | grep -E 'AndroidManifest.xml|classes.dex|resources.arsc'
+          APKSIGNER="$(find "$ANDROID_HOME/build-tools" -type f -name apksigner | sort -V | tail -n 1)"
+          test -x "$APKSIGNER"
+          "$APKSIGNER" verify --verbose "$APK"
 
-      - name: Upload APK
+      - name: Upload installable APK
         uses: actions/upload-artifact@v4
         with:
           name: mkuu-ai-release-apk
-          path: android/app/build/outputs/apk/release/app-release-unsigned.apk
+          path: android/app/build/outputs/apk/release/app-release.apk
+          if-no-files-found: error
+          compression-level: 0
