@@ -22,7 +22,7 @@ export interface GeneratedImageResult {
 
 const BASE_URL = (process.env.MAGIC_HOUR_API_URL || "https://api.magichour.ai/v1").replace(/\/$/, "");
 const API_KEY = process.env.MAGIC_HOUR_API_KEY;
-const REMOVE_BG_API_KEY = process.env.REMOVE_BG_API_KEY;
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 let studioGallery: GeneratedImageResult[] = [];
 
 export function getGalleryImages() { return [...studioGallery]; }
@@ -83,7 +83,7 @@ function parseBase64(source: string) {
   const m = source.match(/^data:image\/([a-zA-Z0-9.+-]+);base64,(.+)$/s);
   if (!m) throw new Error("sourceImage lazima iwe data:image/...;base64,...");
   const extension = m[1].toLowerCase() === "jpeg" ? "jpg" : m[1].toLowerCase();
-  return { extension, mimeType: `image/${extension === "jpg" ? "jpeg" : extension}`, bytes: new Uint8Array(Buffer.from(m[2], "base64")) };
+  return { extension, mimeType: `image/${extension === "jpg" ? "jpeg" : extension}`, base64: m[2], bytes: new Uint8Array(Buffer.from(m[2], "base64")) };
 }
 
 async function uploadImage(source: string) {
@@ -103,45 +103,83 @@ async function uploadImage(source: string) {
   return item.file_path;
 }
 
-/**
- * Credit-safe fallback for background removal.
- * If Magic Hour returns a credit/quota error and REMOVE_BG_API_KEY is configured,
- * the original image is sent to remove.bg and the resulting PNG is returned as
- * a data URL, so the UI still receives a real image instead of a text answer.
- */
-async function removeBackgroundFallback(source: string): Promise<GeneratedImageResult> {
-  if (!REMOVE_BG_API_KEY) {
-    throw new Error("Magic Hour haina credits za kutosha. Weka REMOVE_BG_API_KEY ili Remove background itumie fallback bila kutumia Magic Hour credits.");
+function extractGeminiImage(data: any): string | null {
+  const direct = data?.output_image?.data;
+  if (direct) return `data:image/png;base64,${direct}`;
+  for (const step of (data?.steps || [])) {
+    for (const block of (step?.content || [])) {
+      if ((block?.type === "image" || block?.type === "output_image") && block?.data) {
+        return `data:${block?.mime_type || "image/png"};base64,${block.data}`;
+      }
+      if (block?.inlineData?.data) {
+        return `data:${block.inlineData.mimeType || "image/png"};base64,${block.inlineData.data}`;
+      }
+    }
+  }
+  return null;
+}
+
+/** Gemini image fallback. Uses the same GEMINI_API_KEY already used by MKUU chat. */
+async function geminiImageFallback(options: ImageGenerationOptions): Promise<GeneratedImageResult> {
+  if (!GEMINI_API_KEY) throw new Error("GEMINI_API_KEY haijawekwa kwenye server environment.");
+
+  const input: any[] = [];
+  if (options.sourceImage) {
+    const parsed = parseBase64(options.sourceImage);
+    input.push({ type: "image", mime_type: parsed.mimeType, data: parsed.base64 });
   }
 
-  const { mimeType, bytes } = parseBase64(source);
-  const form = new FormData();
-  form.append("image_file", new Blob([bytes], { type: mimeType }), `mkuu-input.${mimeType === "image/jpeg" ? "jpg" : "png"}`);
-  form.append("size", "auto");
+  let prompt = options.prompt || "Create the requested image.";
+  if (options.mode === "remove_bg") {
+    prompt = "Remove the entire background from the provided image. Keep only the main subject. Preserve the subject's identity, shape, clothing, details and edges exactly. Make the background fully transparent and return a clean PNG with no replacement background. Do not explain anything; output the edited image.";
+  } else if (options.mode === "variation") {
+    prompt = `Create a refined variation of the provided image while preserving the main subject. ${prompt}`;
+  } else if (options.mode === "upscale") {
+    prompt = `Improve detail and clarity while preserving the original image faithfully. ${prompt}`;
+  } else if (options.mode === "mannequin") {
+    prompt = `Place the garment on a professional tailor mannequin with a clean studio background. ${prompt}`;
+  }
+  if (options.style) prompt += ` Style: ${options.style}.`;
+  if (options.negativePrompt) prompt += ` Avoid: ${options.negativePrompt}.`;
+  input.push({ type: "text", text: prompt });
 
-  const response = await fetch("https://api.remove.bg/v1.0/removebg", {
+  const response = await fetch("https://generativelanguage.googleapis.com/v1beta/interactions", {
     method: "POST",
-    headers: { "X-Api-Key": REMOVE_BG_API_KEY },
-    body: form,
+    headers: {
+      "Content-Type": "application/json",
+      "x-goog-api-key": GEMINI_API_KEY,
+    },
+    body: JSON.stringify({
+      model: "gemini-3.1-flash-image",
+      input,
+      response_format: {
+        type: "image",
+        aspect_ratio: options.aspectRatio || "1:1",
+      },
+    }),
   });
 
+  const text = await response.text();
+  let data: any = {};
+  try { data = text ? JSON.parse(text) : {}; } catch { data = { message: text }; }
   if (!response.ok) {
-    const errorText = await response.text().catch(() => "");
-    throw new Error(`Remove.bg fallback failed (${response.status}): ${errorText.substring(0, 240)}`);
+    throw new Error(`Gemini image fallback (${response.status}): ${data?.error?.message || data?.message || text}`);
   }
 
-  const output = Buffer.from(await response.arrayBuffer()).toString("base64");
+  const imageUrl = extractGeminiImage(data);
+  if (!imageUrl) throw new Error("Gemini image fallback haikurudisha picha.");
+
   return saveToGallery({
-    id: `img-removebg-${Date.now()}`,
-    url: `data:image/png;base64,${output}`,
-    prompt: "Remove background",
-    aspectRatio: "auto",
-    style: "background-removal",
-    mode: "remove_bg",
+    id: `img-gemini-${Date.now()}`,
+    url: imageUrl,
+    prompt,
+    aspectRatio: options.aspectRatio || "1:1",
+    style: options.style || "general",
+    mode: options.mode || "generate",
     createdAt: new Date().toISOString(),
-    provider: "remove_bg_fallback",
-    model: "remove.bg",
-    metadata: { fallback: true },
+    provider: "gemini_image_fallback",
+    model: "gemini-3.1-flash-image",
+    metadata: { fallback: true, source: options.sourceImage ? "image_edit" : "text_to_image" },
   });
 }
 
@@ -161,33 +199,39 @@ function makeResult(project: any, options: ImageGenerationOptions, model: string
 }
 
 export async function generateImage(options: ImageGenerationOptions) {
-  const created = await mh("/ai-image-generator", {
-    method: "POST",
-    body: JSON.stringify({
-      name: `MKUU Studio ${new Date().toISOString()}`,
-      image_count: 1,
-      model: "default",
-      aspect_ratio: options.aspectRatio || "1:1",
-      resolution: "auto",
-      style: {
-        prompt: [options.prompt, options.style ? `Style: ${options.style}` : "", options.negativePrompt ? `Avoid: ${options.negativePrompt}` : ""].filter(Boolean).join("\n"),
-        tool: "general",
-      },
-    }),
-  });
-  const project = await waitForCompletion(created.id);
-  return makeResult(project, options, project?.model || "default");
+  try {
+    const created = await mh("/ai-image-generator", {
+      method: "POST",
+      body: JSON.stringify({
+        name: `MKUU Studio ${new Date().toISOString()}`,
+        image_count: 1,
+        model: "default",
+        aspect_ratio: options.aspectRatio || "1:1",
+        resolution: "auto",
+        style: {
+          prompt: [options.prompt, options.style ? `Style: ${options.style}` : "", options.negativePrompt ? `Avoid: ${options.negativePrompt}` : ""].filter(Boolean).join("\n"),
+          tool: "general",
+        },
+      }),
+    });
+    const project = await waitForCompletion(created.id);
+    return makeResult(project, options, project?.model || "default");
+  } catch (err: any) {
+    const message = String(err?.message || err || "");
+    if (/credit|402|quota|insufficient|balance/i.test(message)) {
+      return geminiImageFallback(options);
+    }
+    throw err;
+  }
 }
 
 export async function editImage(options: ImageGenerationOptions) {
   if (!options.sourceImage) throw new Error("sourceImage inahitajika kwa Image Studio edit.");
 
-  // Background removal is the one edit that can safely fail over to another
-  // provider because it does not require generative prompting.
   if (options.mode === "remove_bg") {
     try {
       const filePath = await uploadImage(options.sourceImage);
-      const prompt = `Remove the background and keep the main subject cleanly isolated. ${options.prompt || "Preserve the subject faithfully."}`;
+      const prompt = "Remove the background and keep the main subject cleanly isolated. Preserve the subject faithfully. Do not explain; return the edited image.";
       const created = await mh("/ai-image-editor", {
         method: "POST",
         body: JSON.stringify({
@@ -204,32 +248,41 @@ export async function editImage(options: ImageGenerationOptions) {
       return makeResult(project, options, project?.model || "default");
     } catch (err: any) {
       const message = String(err?.message || err || "");
-      const isCreditError = /credit|402|quota|insufficient|balance/i.test(message);
-      if (isCreditError) return removeBackgroundFallback(options.sourceImage);
+      if (/credit|402|quota|insufficient|balance/i.test(message)) {
+        return geminiImageFallback(options);
+      }
       throw err;
     }
   }
 
-  const filePath = await uploadImage(options.sourceImage);
-  let prompt = options.prompt || "Enhance this image while preserving the subject and natural appearance.";
-  if (options.mode === "mannequin") prompt = `Place the garment on a professional tailor mannequin with a clean studio background. ${prompt}`;
-  if (options.mode === "variation") prompt = `Create a refined visual variation while preserving the main subject. ${prompt}`;
-  if (options.mode === "upscale") prompt = `Enhance detail and clarity while preserving the original image faithfully. ${prompt}`;
+  try {
+    const filePath = await uploadImage(options.sourceImage);
+    let prompt = options.prompt || "Enhance this image while preserving the subject and natural appearance.";
+    if (options.mode === "mannequin") prompt = `Place the garment on a professional tailor mannequin with a clean studio background. ${prompt}`;
+    if (options.mode === "variation") prompt = `Create a refined visual variation while preserving the main subject. ${prompt}`;
+    if (options.mode === "upscale") prompt = `Enhance detail and clarity while preserving the original image faithfully. ${prompt}`;
 
-  const created = await mh("/ai-image-editor", {
-    method: "POST",
-    body: JSON.stringify({
-      name: `MKUU Studio Edit ${new Date().toISOString()}`,
-      image_count: 1,
-      model: "default",
-      aspect_ratio: options.aspectRatio || "auto",
-      resolution: "auto",
-      assets: { image_file_path: filePath },
-      style: { prompt },
-    }),
-  });
-  const project = await waitForCompletion(created.id);
-  return makeResult(project, options, project?.model || "default");
+    const created = await mh("/ai-image-editor", {
+      method: "POST",
+      body: JSON.stringify({
+        name: `MKUU Studio Edit ${new Date().toISOString()}`,
+        image_count: 1,
+        model: "default",
+        aspect_ratio: options.aspectRatio || "auto",
+        resolution: "auto",
+        assets: { image_file_path: filePath },
+        style: { prompt },
+      }),
+    });
+    const project = await waitForCompletion(created.id);
+    return makeResult(project, options, project?.model || "default");
+  } catch (err: any) {
+    const message = String(err?.message || err || "");
+    if (/credit|402|quota|insufficient|balance/i.test(message)) {
+      return geminiImageFallback(options);
+    }
+    throw err;
+  }
 }
 
 export function getImageProvider() {
