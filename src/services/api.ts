@@ -92,11 +92,54 @@ export const api = {
     }
 
     try {
+      // Image actions are handled before normal Gemini chat. This prevents
+      // edit commands such as "Remove background" from becoming explanatory
+      // chat replies when the user has attached an image.
+      const latestUser = [...messages].reverse().find(m => m.role === 'user');
+      const latestUserMessage = latestUser?.content?.trim() || '';
+      const latestAttachments = Array.isArray(latestUser?.attachments) ? latestUser.attachments : [];
+      const sourceImageAttachment = latestAttachments.find((attachment: any) => {
+        const type = String(attachment?.type || attachment?.mimeType || '').toLowerCase();
+        const data = String(attachment?.data || '');
+        return (type.startsWith('image/') || data.startsWith('data:image/')) && data;
+      }) as any;
+
+      const isRemoveBackgroundRequest = /^(remove\s+background|remove-bg|remove_bg|ondoa\s+background|ondoa\s+.*background)$/i.test(latestUserMessage);
+      if (isRemoveBackgroundRequest && sourceImageAttachment?.data) {
+        const imageRes = await fetch(getApiUrl('/api/images/generate'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            prompt: '',
+            aspectRatio: '1:1',
+            style: 'Photorealistic',
+            mode: 'remove_bg',
+            sourceImage: sourceImageAttachment.data,
+          }),
+          signal: timeoutController.signal,
+        });
+
+        if (!imageRes.ok) {
+          const err = await imageRes.json().catch(() => ({ error: `Image editor returned ${imageRes.status}` }));
+          throw new Error(err.error || `Image editor returned ${imageRes.status}`);
+        }
+
+        const imageData = await imageRes.json();
+        const imageUrl = String(imageData?.url || '').trim();
+        if (!imageUrl) {
+          throw new Error('Magic Hour haikurudisha URL ya picha iliyohaririwa.');
+        }
+
+        const imageMarkdown = `![Background imeondolewa na MKUU AI](${imageUrl})`;
+        onStart?.({ model: imageData?.model ? `magic_hour:${imageData.model}` : 'magic_hour' });
+        if (stream && onChunk) onChunk(imageMarkdown);
+        return { text: imageMarkdown, reply: imageMarkdown, model: imageData?.model || 'magic_hour' };
+      }
+
       // Image mode is explicitly marked by MessageComposer as /image.
       // Route it to the real Magic Hour image endpoint instead of Gemini chat,
       // then return Markdown containing the generated image URL so the normal
       // message renderer displays the actual image rather than only the prompt.
-      const latestUserMessage = [...messages].reverse().find(m => m.role === 'user')?.content?.trim() || '';
       const imageMatch = latestUserMessage.match(/^\/image\s+([\s\S]+)$/i);
       if (imageMatch) {
         const imagePrompt = imageMatch[1].trim();
@@ -138,7 +181,7 @@ export const api = {
           temperature,
           activeMemories,
           userProfile,
-          stream: false, // Use fast JSON transport
+          stream: false,
         }),
         signal: timeoutController.signal,
       });
@@ -162,7 +205,6 @@ export const api = {
       }
 
       if (stream && onChunk) {
-        // Fluidly stream words to the user interface
         const words = textVal.split(' ');
         let currentText = '';
         for (let i = 0; i < words.length; i += 2) {
@@ -172,7 +214,6 @@ export const api = {
           const chunk = words.slice(i, i + 2).join(' ') + (i + 2 < words.length ? ' ' : '');
           currentText += chunk;
           onChunk(chunk);
-          // Fast micro-tick for organic feel
           await new Promise(r => setTimeout(r, 12));
         }
       }
