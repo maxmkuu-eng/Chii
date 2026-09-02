@@ -1,0 +1,6 @@
+{
+  "name": "MKUU AI",
+  "description": "MKUU AI — A bespoke, premium AI assistant designed with an original interface, real-time search grounding, intelligent tools, file understanding, voice input, and image generation.",
+  "requestFramePermissions": ["camera", "microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
