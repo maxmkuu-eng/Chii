@@ -92,6 +92,43 @@ export const api = {
     }
 
     try {
+      // Image mode is explicitly marked by MessageComposer as /image.
+      // Route it to the real Magic Hour image endpoint instead of Gemini chat,
+      // then return Markdown containing the generated image URL so the normal
+      // message renderer displays the actual image rather than only the prompt.
+      const latestUserMessage = [...messages].reverse().find(m => m.role === 'user')?.content?.trim() || '';
+      const imageMatch = latestUserMessage.match(/^\/image\s+([\s\S]+)$/i);
+      if (imageMatch) {
+        const imagePrompt = imageMatch[1].trim();
+        const imageRes = await fetch(getApiUrl('/api/images/generate'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            prompt: imagePrompt,
+            aspectRatio: '1:1',
+            style: 'Photorealistic',
+            mode: 'generate',
+          }),
+          signal: timeoutController.signal,
+        });
+
+        if (!imageRes.ok) {
+          const err = await imageRes.json().catch(() => ({ error: `Image server returned ${imageRes.status}` }));
+          throw new Error(err.error || `Image server returned ${imageRes.status}`);
+        }
+
+        const imageData = await imageRes.json();
+        const imageUrl = String(imageData?.url || '').trim();
+        if (!imageUrl) {
+          throw new Error('Magic Hour haikurudisha URL ya picha iliyotengenezwa.');
+        }
+
+        const imageMarkdown = `![Picha iliyotengenezwa na MKUU AI](${imageUrl})`;
+        onStart?.({ model: imageData?.model ? `magic_hour:${imageData.model}` : 'magic_hour' });
+        if (stream && onChunk) onChunk(imageMarkdown);
+        return { text: imageMarkdown, reply: imageMarkdown, model: imageData?.model || 'magic_hour' };
+      }
+
       const res = await fetch(getApiUrl('/api/chat'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -192,8 +229,7 @@ export const api = {
   },
 
   async clearMemories(): Promise<void> {
-    const res = await fetch(getApiUrl('/api/memory'), { method: 'DELETE' });
-    if (!res.ok) throw new Error('Failed to clear memories');
+    await fetch(getApiUrl('/api/memory'), { method: 'DELETE' });
   },
 
   async extractMemories(text: string): Promise<Array<{ title: string; content: string; category: any; reason: string }>> {
