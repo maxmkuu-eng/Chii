@@ -7,9 +7,13 @@ import android.content.pm.PackageManager;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.telephony.SmsManager;
+import android.telephony.SubscriptionInfo;
+import android.telephony.SubscriptionManager;
 import android.view.View;
 import android.view.Window;
 import android.view.WindowInsets;
+import android.webkit.JavascriptInterface;
 import android.webkit.PermissionRequest;
 import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
@@ -17,6 +21,11 @@ import android.webkit.WebResourceRequest;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
+
+import org.json.JSONArray;
+import org.json.JSONObject;
+
+import java.util.List;
 
 public class MainActivity extends Activity {
     private static final String APP_URL = "https://chii-0u0af.faable.link/";
@@ -39,9 +48,6 @@ public class MainActivity extends Activity {
         webView = new WebView(this);
         setContentView(webView);
 
-        // Android 15 enforces edge-to-edge for apps targeting SDK 35.
-        // Keep the web UI inside the visible area so the header/input are
-        // not drawn underneath the status or navigation/gesture bars.
         webView.setOnApplyWindowInsetsListener((view, insets) -> {
             int top = 0;
             int bottom = 0;
@@ -67,6 +73,11 @@ public class MainActivity extends Activity {
         settings.setBuiltInZoomControls(false);
         settings.setDisplayZoomControls(false);
         settings.setSupportZoom(false);
+
+        // Native bridge used by MKUU Auto Reply to read real SIMs and select
+        // the subscription used for outgoing SMS. The web UI remains the same
+        // on normal browsers; this bridge is available only inside the APK.
+        webView.addJavascriptInterface(new AndroidSmsBridge(), "MkuuAndroidSms");
 
         webView.setWebViewClient(new WebViewClient() {
             @Override
@@ -108,20 +119,98 @@ public class MainActivity extends Activity {
         webView.loadUrl(APP_URL);
     }
 
+    private class AndroidSmsBridge {
+        @JavascriptInterface
+        public String getSimCards() {
+            try {
+                if (Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP) return "[]";
+                if (checkSelfPermission(Manifest.permission.READ_PHONE_STATE) != PackageManager.PERMISSION_GRANTED) return "[]";
+
+                SubscriptionManager manager = getSystemService(SubscriptionManager.class);
+                if (manager == null) return "[]";
+                List<SubscriptionInfo> active = manager.getActiveSubscriptionInfoList();
+                JSONArray result = new JSONArray();
+                if (active == null) return result.toString();
+
+                for (SubscriptionInfo info : active) {
+                    int slot = info.getSimSlotIndex();
+                    if (slot < 0 || slot > 1) continue;
+                    JSONObject sim = new JSONObject();
+                    String carrier = info.getCarrierName() == null ? "" : info.getCarrierName().toString();
+                    String number = "";
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                            checkSelfPermission(Manifest.permission.READ_PHONE_NUMBERS) == PackageManager.PERMISSION_GRANTED) {
+                        number = info.getNumber() == null ? "" : info.getNumber();
+                    } else if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+                        number = info.getNumber() == null ? "" : info.getNumber();
+                    }
+                    sim.put("id", "android-subscription-" + info.getSubscriptionId());
+                    sim.put("slotIndex", slot);
+                    sim.put("slotLabel", "SIM " + (slot + 1));
+                    sim.put("carrierName", carrier);
+                    sim.put("displayName", carrier.isEmpty() ? "SIM " + (slot + 1) : carrier + " • SIM " + (slot + 1));
+                    sim.put("phoneNumber", number);
+                    sim.put("isAvailable", true);
+                    result.put(sim);
+                }
+                return result.toString();
+            } catch (Exception e) {
+                return "[]";
+            }
+        }
+
+        @JavascriptInterface
+        public String sendSms(String recipient, String content, int slotIndex) {
+            try {
+                if (checkSelfPermission(Manifest.permission.SEND_SMS) != PackageManager.PERMISSION_GRANTED) {
+                    return "{\"success\":false,\"error\":\"SEND_SMS permission haijatolewa.\"}";
+                }
+                if (Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP) {
+                    SmsManager.getDefault().sendTextMessage(recipient, null, content, null, null);
+                    return "{\"success\":true}";
+                }
+                SubscriptionManager manager = getSystemService(SubscriptionManager.class);
+                if (manager == null) return "{\"success\":false,\"error\":\"SubscriptionManager haipatikani.\"}";
+                if (checkSelfPermission(Manifest.permission.READ_PHONE_STATE) != PackageManager.PERMISSION_GRANTED) {
+                    return "{\"success\":false,\"error\":\"READ_PHONE_STATE permission haijatolewa.\"}";
+                }
+                List<SubscriptionInfo> active = manager.getActiveSubscriptionInfoList();
+                SubscriptionInfo selected = null;
+                if (active != null) {
+                    for (SubscriptionInfo info : active) {
+                        if (info.getSimSlotIndex() == slotIndex) { selected = info; break; }
+                    }
+                }
+                if (selected == null) return "{\"success\":false,\"error\":\"SIM " + (slotIndex + 1) + " haipatikani.\"}";
+                SmsManager sms = getSystemService(SmsManager.class).createForSubscriptionId(selected.getSubscriptionId());
+                sms.sendTextMessage(recipient, null, content, null, null);
+                return "{\"success\":true}";
+            } catch (Exception e) {
+                String message = e.getMessage() == null ? "SMS imeshindwa kutumwa." : e.getMessage().replace("\\", "\\\\").replace("\"", "\\\"");
+                return "{\"success\":false,\"error\":\"" + message + "\"}";
+            }
+        }
+    }
+
     private void requestRuntimePermissions() {
-        if (android.os.Build.VERSION.SDK_INT >= 23) {
+        if (Build.VERSION.SDK_INT >= 23) {
             java.util.ArrayList<String> permissions = new java.util.ArrayList<>();
             String[] wanted = new String[] {
                     Manifest.permission.RECORD_AUDIO,
                     Manifest.permission.CAMERA,
                     Manifest.permission.READ_SMS,
                     Manifest.permission.RECEIVE_SMS,
-                    Manifest.permission.SEND_SMS
+                    Manifest.permission.SEND_SMS,
+                    Manifest.permission.READ_PHONE_STATE
             };
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                permissions.add(Manifest.permission.READ_PHONE_NUMBERS);
+            }
             for (String permission : wanted) {
                 if (checkSelfPermission(permission) != PackageManager.PERMISSION_GRANTED) permissions.add(permission);
             }
-            if (!permissions.isEmpty()) requestPermissions(permissions.toArray(new String[0]), REQUEST_PERMISSIONS);
+            java.util.LinkedHashSet<String> unique = new java.util.LinkedHashSet<>(permissions);
+            if (!unique.isEmpty()) requestPermissions(unique.toArray(new String[0]), REQUEST_PERMISSIONS);
         }
     }
 
