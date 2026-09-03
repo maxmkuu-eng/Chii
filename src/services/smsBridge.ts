@@ -11,12 +11,7 @@ import {
 } from '../types';
 import { getApiUrl } from './api';
 
-/**
- * MKUU AI Android SMS & Native Bridge Layer
- *
- * Implements Android sensitive permissions model, dual-SIM detection & selection,
- * background SMS receiver interfaces, and server-side AI auto-reply synchronization.
- */
+/** MKUU AI Android SMS & Native Bridge Layer. */
 class MkuuSmsBridgeService {
   private isAndroidNative(): boolean {
     if (typeof window === 'undefined') return false;
@@ -47,10 +42,6 @@ class MkuuSmsBridgeService {
     };
   }
 
-  // -------------------------------------------------------------
-  // PERMISSIONS MANAGEMENT
-  // -------------------------------------------------------------
-
   async getPermissions(): Promise<SmsPermissions> {
     try {
       const res = await fetch(getApiUrl('/api/sms/permissions'));
@@ -58,27 +49,16 @@ class MkuuSmsBridgeService {
       const data = await res.json();
       return data.permissions;
     } catch {
-      return {
-        readSms: 'granted',
-        receiveSms: 'granted',
-        sendSms: 'granted',
-        notifications: 'granted',
-      };
+      return { readSms: 'granted', receiveSms: 'granted', sendSms: 'granted', notifications: 'granted' };
     }
   }
 
-  async updatePermission(
-    key: keyof SmsPermissions,
-    state: PermissionState
-  ): Promise<SmsPermissions> {
+  async updatePermission(key: keyof SmsPermissions, state: PermissionState): Promise<SmsPermissions> {
     const res = await fetch(getApiUrl('/api/sms/permissions'), {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ [key]: state }),
+      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ [key]: state }),
     });
     if (!res.ok) throw new Error('Failed to update permission state');
-    const data = await res.json();
-    return data.permissions;
+    return (await res.json()).permissions;
   }
 
   // -------------------------------------------------------------
@@ -86,11 +66,26 @@ class MkuuSmsBridgeService {
   // -------------------------------------------------------------
 
   async getSimCards(): Promise<SimCard[]> {
+    // The APK is the source of truth for physical SIM state. Never show
+    // server/sample numbers when native Android can provide the real lines.
+    if (typeof window !== 'undefined') {
+      const native = (window as any).MkuuAndroidSms;
+      if (native?.getSimCards) {
+        try {
+          const raw = native.getSimCards();
+          const sims = typeof raw === 'string' ? JSON.parse(raw) : raw;
+          if (Array.isArray(sims)) return sims as SimCard[];
+        } catch {
+          // Fall through to server only when the native bridge is unavailable.
+        }
+      }
+    }
+
     try {
       const res = await fetch(getApiUrl('/api/sms/sims'));
       if (!res.ok) throw new Error('Failed to fetch SIM cards');
       const data = await res.json();
-      return data.sims;
+      return Array.isArray(data.sims) ? data.sims : [];
     } catch {
       return [];
     }
@@ -98,13 +93,10 @@ class MkuuSmsBridgeService {
 
   async updateSimCards(updates: Partial<SimCard>[]): Promise<SimCard[]> {
     const res = await fetch(getApiUrl('/api/sms/sims'), {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ updates }),
+      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ updates }),
     });
     if (!res.ok) throw new Error('Failed to update SIM configuration');
-    const data = await res.json();
-    return data.sims;
+    return (await res.json()).sims;
   }
 
   // -------------------------------------------------------------
@@ -114,29 +106,24 @@ class MkuuSmsBridgeService {
   async getConversations(): Promise<SmsConversation[]> {
     const res = await fetch(getApiUrl('/api/sms/inbox'));
     if (!res.ok) throw new Error('Failed to fetch SMS inbox');
-    const data = await res.json();
-    return data.conversations || [];
+    return (await res.json()).conversations || [];
   }
 
   async getConversation(id: string): Promise<SmsConversation> {
     const res = await fetch(getApiUrl(`/api/sms/threads/${id}`));
     if (!res.ok) throw new Error('Failed to fetch SMS conversation');
-    const data = await res.json();
-    return data.conversation;
+    return (await res.json()).conversation;
   }
 
   async deleteConversation(id: string): Promise<boolean> {
     const res = await fetch(getApiUrl(`/api/sms/threads/${id}`), { method: 'DELETE' });
     if (!res.ok) throw new Error('Failed to delete SMS thread');
-    const data = await res.json();
-    return data.success;
+    return (await res.json()).success;
   }
 
   async batchDeleteConversations(threadIds: string[]): Promise<{ deletedCount: number; remainingCount: number }> {
     const res = await fetch(getApiUrl('/api/sms/threads/batch-delete'), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ threadIds }),
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ threadIds }),
     });
     if (!res.ok) throw new Error('Failed to batch delete SMS threads');
     return res.json();
@@ -153,16 +140,33 @@ class MkuuSmsBridgeService {
     return res.json();
   }
 
-  async sendSms(params: {
-    recipient: string;
-    recipientName?: string;
-    content: string;
-    simSlot: 'SIM 1' | 'SIM 2';
-  }): Promise<{ success: boolean; message: SmsMessage; thread: SmsConversation }> {
+  async sendSms(params: { recipient: string; recipientName?: string; content: string; simSlot: 'SIM 1' | 'SIM 2' }): Promise<{ success: boolean; message: SmsMessage; thread: SmsConversation }> {
+    // Send from the actual Android subscription selected by Auto Reply.
+    const native = typeof window !== 'undefined' ? (window as any).MkuuAndroidSms : null;
+    if (native?.sendSms) {
+      const slotIndex = params.simSlot === 'SIM 2' ? 1 : 0;
+      const raw = native.sendSms(params.recipient, params.content, slotIndex);
+      const result = typeof raw === 'string' ? JSON.parse(raw) : raw;
+      if (!result?.success) throw new Error(result?.error || 'SMS imeshindwa kutumwa kupitia SIM iliyochaguliwa.');
+      const now = new Date().toISOString();
+      const simId = `android-sim-${slotIndex}`;
+      const message: SmsMessage = {
+        id: `local-${Date.now()}`,
+        threadId: `local-${params.recipient}`,
+        sender: 'Me', recipient: params.recipient, recipientName: params.recipientName,
+        content: params.content, timestamp: now, direction: 'outgoing',
+        simSlot: params.simSlot, simId, status: 'sent',
+      };
+      const thread: SmsConversation = {
+        id: message.threadId, phoneNumber: params.recipient, contactName: params.recipientName,
+        lastMessage: params.content, lastTimestamp: now, unreadCount: 0,
+        simSlot: params.simSlot, messages: [message],
+      };
+      return { success: true, message, thread };
+    }
+
     const res = await fetch(getApiUrl('/api/sms/send'), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(params),
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(params),
     });
     if (!res.ok) {
       const err = await res.json().catch(() => ({ error: 'Failed to send SMS' }));
@@ -171,15 +175,9 @@ class MkuuSmsBridgeService {
     return res.json();
   }
 
-  // -------------------------------------------------------------
-  // EMERGENCY KILL SWITCH & AUTO REPLY ENGINE
-  // -------------------------------------------------------------
-
   async toggleKillSwitch(active?: boolean): Promise<{ killSwitchActive: boolean; enabled: boolean }> {
     const res = await fetch(getApiUrl('/api/sms/auto-reply/kill-switch'), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ active }),
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ active }),
     });
     if (!res.ok) throw new Error('Failed to toggle emergency kill switch');
     return res.json();
@@ -188,81 +186,48 @@ class MkuuSmsBridgeService {
   async getAutoReplySettings(): Promise<AutoReplySettings> {
     const res = await fetch(getApiUrl('/api/sms/auto-reply/settings'));
     if (!res.ok) throw new Error('Failed to fetch Auto Reply settings');
-    const data = await res.json();
-    return data.settings;
+    return (await res.json()).settings;
   }
 
   async updateAutoReplySettings(settings: Partial<AutoReplySettings>): Promise<AutoReplySettings> {
     const res = await fetch(getApiUrl('/api/sms/auto-reply/settings'), {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(settings),
+      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(settings),
     });
     if (!res.ok) throw new Error('Failed to update Auto Reply settings');
-    const data = await res.json();
-    return data.settings;
+    return (await res.json()).settings;
   }
-
-  // -------------------------------------------------------------
-  // WATU WANGU (VIP & INNER CIRCLE) MANAGEMENT
-  // -------------------------------------------------------------
 
   async getWatuWangu(): Promise<WatuWanguContact[]> {
     const res = await fetch(getApiUrl('/api/sms/watu-wangu'));
     if (!res.ok) throw new Error('Failed to fetch Watu Wangu contacts');
-    const data = await res.json();
-    return data.contacts || [];
+    return (await res.json()).contacts || [];
   }
 
   async addWatuWangu(contact: Omit<WatuWanguContact, 'id' | 'createdAt'>): Promise<WatuWanguContact> {
     const res = await fetch(getApiUrl('/api/sms/watu-wangu'), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(contact),
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(contact),
     });
     if (!res.ok) throw new Error('Failed to add contact to Watu Wangu');
-    const data = await res.json();
-    return data.contact;
+    return (await res.json()).contact;
   }
 
   async updateWatuWangu(id: string, updates: Partial<WatuWanguContact>): Promise<WatuWanguContact> {
     const res = await fetch(getApiUrl(`/api/sms/watu-wangu/${id}`), {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(updates),
+      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(updates),
     });
     if (!res.ok) throw new Error('Failed to update Watu Wangu contact');
-    const data = await res.json();
-    return data.contact;
+    return (await res.json()).contact;
   }
 
   async deleteWatuWangu(id: string): Promise<boolean> {
     const res = await fetch(getApiUrl(`/api/sms/watu-wangu/${id}`), { method: 'DELETE' });
     if (!res.ok) throw new Error('Failed to delete Watu Wangu contact');
-    const data = await res.json();
-    return data.success;
+    return (await res.json()).success;
   }
 
-  // -------------------------------------------------------------
-  // SIMULATION & LOGS
-  // -------------------------------------------------------------
-
-  async simulateIncomingSms(params: {
-    sender: string;
-    senderName?: string;
-    content: string;
-    simSlot: 'SIM 1' | 'SIM 2';
-  }): Promise<{
-    savedMessage: SmsMessage;
-    autoReplyAttempted: boolean;
-    autoReplySent: boolean;
-    log?: AutoReplyLog;
-    reason?: string;
-  }> {
+  async simulateIncomingSms(params: { sender: string; senderName?: string; content: string; simSlot: 'SIM 1' | 'SIM 2' }): Promise<{ savedMessage: SmsMessage; autoReplyAttempted: boolean; autoReplySent: boolean; log?: AutoReplyLog; reason?: string }> {
     const res = await fetch(getApiUrl('/api/sms/auto-reply/simulate-incoming'), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(params),
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(params),
     });
     if (!res.ok) {
       const err = await res.json().catch(() => ({ error: 'Failed to process incoming SMS' }));
@@ -274,8 +239,7 @@ class MkuuSmsBridgeService {
   async getAutoReplyLogs(): Promise<AutoReplyLog[]> {
     const res = await fetch(getApiUrl('/api/sms/auto-reply/history'));
     if (!res.ok) throw new Error('Failed to fetch Auto Reply logs');
-    const data = await res.json();
-    return data.logs || [];
+    return (await res.json()).logs || [];
   }
 
   async clearAutoReplyLogs(): Promise<void> {
@@ -283,26 +247,18 @@ class MkuuSmsBridgeService {
     if (!res.ok) throw new Error('Failed to clear Auto Reply history');
   }
 
-  // -------------------------------------------------------------
-  // NOTIFICATION SETTINGS
-  // -------------------------------------------------------------
-
   async getNotificationSettings(): Promise<SmsNotificationSettings> {
     const res = await fetch(getApiUrl('/api/sms/notifications/settings'));
     if (!res.ok) throw new Error('Failed to fetch notification settings');
-    const data = await res.json();
-    return data.settings;
+    return (await res.json()).settings;
   }
 
   async updateNotificationSettings(settings: Partial<SmsNotificationSettings>): Promise<SmsNotificationSettings> {
     const res = await fetch(getApiUrl('/api/sms/notifications/settings'), {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(settings),
+      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(settings),
     });
     if (!res.ok) throw new Error('Failed to update notification settings');
-    const data = await res.json();
-    return data.settings;
+    return (await res.json()).settings;
   }
 }
 
