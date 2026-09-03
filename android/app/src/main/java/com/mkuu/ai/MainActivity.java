@@ -2,250 +2,228 @@ package com.mkuu.ai;
 
 import android.Manifest;
 import android.app.Activity;
+import android.content.Intent;
 import android.content.pm.PackageManager;
-import android.graphics.Typeface;
+import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.telephony.SmsManager;
 import android.telephony.SubscriptionInfo;
 import android.telephony.SubscriptionManager;
-import android.view.Gravity;
 import android.view.View;
-import android.widget.ArrayAdapter;
-import android.widget.Button;
-import android.widget.EditText;
-import android.widget.LinearLayout;
-import android.widget.ScrollView;
-import android.widget.Spinner;
-import android.widget.TextView;
-import android.widget.Toast;
+import android.view.Window;
+import android.view.WindowInsets;
+import android.webkit.JavascriptInterface;
+import android.webkit.PermissionRequest;
+import android.webkit.ValueCallback;
+import android.webkit.WebChromeClient;
+import android.webkit.WebResourceRequest;
+import android.webkit.WebSettings;
+import android.webkit.WebView;
+import android.webkit.WebViewClient;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
 
-import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 
 public class MainActivity extends Activity {
-    // This is used only as an API endpoint. The APK never loads a webpage/WebView.
-    private static final String API_BASE = "https://chii-0u0af.faable.link";
-    private static final int PERMISSIONS = 4101;
-
-    private final ExecutorService executor = Executors.newCachedThreadPool();
-    private final ArrayList<SubscriptionInfo> activeSubscriptions = new ArrayList<>();
-    private LinearLayout content;
-    private TextView chatOutput;
-    private EditText chatInput;
-    private Spinner simSpinner;
+    private static final String APP_URL = "https://chii-0u0af.faable.link/";
+    private static final int REQUEST_PERMISSIONS = 1001;
+    private static final int FILE_CHOOSER = 1002;
+    private WebView webView;
+    private ValueCallback<Uri[]> fileCallback;
 
     @Override
-    protected void onCreate(Bundle state) {
-        super.onCreate(state);
-        requestPermissionsIfNeeded();
-        buildNativeUi();
-    }
+    protected void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
 
-    private void buildNativeUi() {
-        LinearLayout root = new LinearLayout(this);
-        root.setOrientation(LinearLayout.VERTICAL);
-        root.setBackgroundColor(0xFFFFFFFF);
-
-        TextView header = new TextView(this);
-        header.setText("MKUU AI");
-        header.setTextSize(24);
-        header.setTextColor(0xFF111111);
-        header.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
-        header.setGravity(Gravity.CENTER_VERTICAL);
-        header.setPadding(24, 18, 24, 18);
-        root.addView(header, new LinearLayout.LayoutParams(-1, 70));
-
-        LinearLayout nav = new LinearLayout(this);
-        nav.setPadding(12, 4, 12, 8);
-        String[] labels = {"Chat", "SMS", "Auto Reply"};
-        for (String label : labels) {
-            Button b = new Button(this);
-            b.setText(label);
-            b.setAllCaps(false);
-            b.setOnClickListener(v -> showModule(label));
-            nav.addView(b, new LinearLayout.LayoutParams(0, 52, 1));
+        Window window = getWindow();
+        window.setStatusBarColor(0xFFFFFFFF);
+        window.setNavigationBarColor(0xFF000000);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            window.getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR);
         }
-        root.addView(nav);
 
-        ScrollView scroll = new ScrollView(this);
-        content = new LinearLayout(this);
-        content.setOrientation(LinearLayout.VERTICAL);
-        content.setPadding(20, 16, 20, 24);
-        scroll.addView(content);
-        root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
+        webView = new WebView(this);
+        setContentView(webView);
 
-        setContentView(root);
-        showChat();
-    }
+        webView.setOnApplyWindowInsetsListener((view, insets) -> {
+            int top = 0;
+            int bottom = 0;
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                android.graphics.Insets bars = insets.getInsets(WindowInsets.Type.systemBars());
+                top = bars.top;
+                bottom = bars.bottom;
+            } else {
+                top = insets.getSystemWindowInsetTop();
+                bottom = insets.getSystemWindowInsetBottom();
+            }
+            view.setPadding(0, top, 0, bottom);
+            return insets;
+        });
+        webView.requestApplyInsets();
 
-    private TextView title(String text) {
-        TextView v = new TextView(this);
-        v.setText(text);
-        v.setTextSize(21);
-        v.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
-        v.setTextColor(0xFF111111);
-        v.setPadding(0, 8, 0, 16);
-        return v;
-    }
+        WebSettings settings = webView.getSettings();
+        settings.setJavaScriptEnabled(true);
+        settings.setDomStorageEnabled(true);
+        settings.setDatabaseEnabled(true);
+        settings.setAllowFileAccess(true);
+        settings.setMediaPlaybackRequiresUserGesture(false);
+        settings.setBuiltInZoomControls(false);
+        settings.setDisplayZoomControls(false);
+        settings.setSupportZoom(false);
 
-    private void showModule(String module) {
-        if ("SMS".equals(module)) showSms();
-        else if ("Auto Reply".equals(module)) showAutoReply();
-        else showChat();
-    }
+        webView.addJavascriptInterface(new AndroidSmsBridge(), "MkuuAndroidSms");
 
-    private void showChat() {
-        content.removeAllViews();
-        content.addView(title("Chat"));
-
-        chatOutput = new TextView(this);
-        chatOutput.setText("MKUU AI iko tayari.\n\n");
-        chatOutput.setTextSize(16);
-        chatOutput.setTextColor(0xFF222222);
-        chatOutput.setPadding(4, 8, 4, 18);
-        content.addView(chatOutput, new LinearLayout.LayoutParams(-1, 0, 1));
-
-        chatInput = new EditText(this);
-        chatInput.setHint("Andika ujumbe...");
-        chatInput.setTextSize(16);
-        content.addView(chatInput, new LinearLayout.LayoutParams(-1, 60));
-
-        Button send = new Button(this);
-        send.setText("Tuma");
-        send.setAllCaps(false);
-        send.setOnClickListener(v -> sendChat());
-        content.addView(send, new LinearLayout.LayoutParams(-1, 56));
-    }
-
-    private void sendChat() {
-        final String message = chatInput.getText().toString().trim();
-        if (message.isEmpty()) return;
-        chatOutput.append("\nWewe: " + message + "\n");
-        chatInput.setText("");
-        executor.execute(() -> {
-            try {
-                JSONObject body = new JSONObject();
-                JSONArray messages = new JSONArray();
-                messages.put(new JSONObject().put("role", "user").put("content", message));
-                body.put("messages", messages).put("stream", false);
-                JSONObject result = NativeApiClient.postJson(API_BASE + "/api/chat", body);
-                String reply = result.optString("text", result.optString("reply", "MKUU AI haikupokea jibu."));
-                runOnUiThread(() -> chatOutput.append("MKUU AI: " + reply + "\n"));
-            } catch (Exception e) {
-                runOnUiThread(() -> chatOutput.append("MKUU AI: Seva haipatikani. " + e.getMessage() + "\n"));
+        webView.setWebViewClient(new WebViewClient() {
+            @Override
+            public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
+                Uri uri = request.getUrl();
+                String scheme = uri.getScheme();
+                if ("http".equals(scheme) || "https".equals(scheme)) return false;
+                try { startActivity(new Intent(Intent.ACTION_VIEW, uri)); } catch (Exception ignored) {}
+                return true;
             }
         });
+
+        webView.setWebChromeClient(new WebChromeClient() {
+            @Override
+            public void onPermissionRequest(final PermissionRequest request) {
+                runOnUiThread(() -> {
+                    if (request.getOrigin().toString().startsWith(APP_URL)) {
+                        request.grant(request.getResources());
+                    } else {
+                        request.deny();
+                    }
+                });
+            }
+
+            @Override
+            public boolean onShowFileChooser(WebView webView, ValueCallback<Uri[]> callback, FileChooserParams params) {
+                if (fileCallback != null) fileCallback.onReceiveValue(null);
+                fileCallback = callback;
+                Intent intent = params.createIntent();
+                try { startActivityForResult(intent, FILE_CHOOSER); } catch (Exception e) {
+                    fileCallback = null;
+                    callback.onReceiveValue(null);
+                }
+                return true;
+            }
+        });
+
+        requestRuntimePermissions();
+        webView.loadUrl(APP_URL);
     }
 
-    private void showSms() {
-        content.removeAllViews();
-        content.addView(title("SMS"));
-        content.addView(new TextView(this) {{ setText("SMS hutumwa moja kwa moja kupitia SIM ya simu hii."); setTextSize(15); setPadding(0,0,0,16); }});
-
-        EditText recipient = new EditText(this);
-        recipient.setHint("Namba ya mpokeaji");
-        content.addView(recipient, new LinearLayout.LayoutParams(-1, 60));
-        EditText message = new EditText(this);
-        message.setHint("Ujumbe");
-        content.addView(message, new LinearLayout.LayoutParams(-1, 90));
-
-        simSpinner = new Spinner(this);
-        content.addView(simSpinner, new LinearLayout.LayoutParams(-1, 60));
-        loadSims();
-
-        Button send = new Button(this);
-        send.setText("Tuma SMS");
-        send.setAllCaps(false);
-        send.setOnClickListener(v -> sendNativeSms(recipient.getText().toString().trim(), message.getText().toString().trim()));
-        content.addView(send, new LinearLayout.LayoutParams(-1, 56));
-    }
-
-    private void loadSims() {
-        ArrayList<String> labels = new ArrayList<>();
-        activeSubscriptions.clear();
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP && checkSelfPermission(Manifest.permission.READ_PHONE_STATE) == PackageManager.PERMISSION_GRANTED) {
-            SubscriptionManager sm = getSystemService(SubscriptionManager.class);
+    private class AndroidSmsBridge {
+        @JavascriptInterface
+        public String getSimCards() {
             try {
-                List<SubscriptionInfo> list = sm == null ? null : sm.getActiveSubscriptionInfoList();
-                if (list != null) {
-                    for (SubscriptionInfo info : list) {
-                        int slot = info.getSimSlotIndex();
-                        if (slot < 0 || slot > 1) continue;
-                        activeSubscriptions.add(info);
-                        String carrier = info.getCarrierName() == null ? "SIM " + (slot + 1) : info.getCarrierName().toString();
-                        String number = info.getNumber();
-                        labels.add(carrier + " • SIM " + (slot + 1) + (number == null || number.isEmpty() ? "" : " • " + number));
+                if (Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP) return "[]";
+                if (checkSelfPermission(Manifest.permission.READ_PHONE_STATE) != PackageManager.PERMISSION_GRANTED) return "[]";
+
+                SubscriptionManager manager = getSystemService(SubscriptionManager.class);
+                if (manager == null) return "[]";
+                List<SubscriptionInfo> active = manager.getActiveSubscriptionInfoList();
+                JSONArray result = new JSONArray();
+                if (active == null) return result.toString();
+
+                for (SubscriptionInfo info : active) {
+                    int slot = info.getSimSlotIndex();
+                    if (slot < 0 || slot > 1) continue;
+                    JSONObject sim = new JSONObject();
+                    String carrier = info.getCarrierName() == null ? "" : info.getCarrierName().toString();
+                    String number = "";
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                            checkSelfPermission(Manifest.permission.READ_PHONE_NUMBERS) == PackageManager.PERMISSION_GRANTED) {
+                        number = info.getNumber() == null ? "" : info.getNumber();
+                    } else if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+                        number = info.getNumber() == null ? "" : info.getNumber();
+                    }
+                    sim.put("id", "android-subscription-" + info.getSubscriptionId());
+                    sim.put("slotIndex", slot);
+                    sim.put("slotLabel", "SIM " + (slot + 1));
+                    sim.put("carrierName", carrier);
+                    sim.put("displayName", carrier.isEmpty() ? "SIM " + (slot + 1) : carrier + " • SIM " + (slot + 1));
+                    sim.put("phoneNumber", number);
+                    sim.put("isAvailable", true);
+                    result.put(sim);
+                }
+                return result.toString();
+            } catch (Exception e) {
+                return "[]";
+            }
+        }
+
+        @JavascriptInterface
+        public String sendSms(String recipient, String content, int slotIndex) {
+            try {
+                if (checkSelfPermission(Manifest.permission.SEND_SMS) != PackageManager.PERMISSION_GRANTED) {
+                    return "{\"success\":false,\"error\":\"SEND_SMS permission haijatolewa.\"}";
+                }
+                if (Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP) {
+                    SmsManager.getDefault().sendTextMessage(recipient, null, content, null, null);
+                    return "{\"success\":true}";
+                }
+                SubscriptionManager manager = getSystemService(SubscriptionManager.class);
+                if (manager == null) return "{\"success\":false,\"error\":\"SubscriptionManager haipatikani.\"}";
+                if (checkSelfPermission(Manifest.permission.READ_PHONE_STATE) != PackageManager.PERMISSION_GRANTED) {
+                    return "{\"success\":false,\"error\":\"READ_PHONE_STATE permission haijatolewa.\"}";
+                }
+                List<SubscriptionInfo> active = manager.getActiveSubscriptionInfoList();
+                SubscriptionInfo selected = null;
+                if (active != null) {
+                    for (SubscriptionInfo info : active) {
+                        if (info.getSimSlotIndex() == slotIndex) { selected = info; break; }
                     }
                 }
-            } catch (SecurityException ignored) {}
-        }
-        if (labels.isEmpty()) labels.add("Hakuna SIM inayopatikana");
-        simSpinner.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item, labels));
-    }
-
-    private void sendNativeSms(String recipient, String message) {
-        if (recipient.isEmpty() || message.isEmpty()) {
-            Toast.makeText(this, "Jaza namba na ujumbe.", Toast.LENGTH_SHORT).show();
-            return;
-        }
-        if (activeSubscriptions.isEmpty()) {
-            Toast.makeText(this, "Hakuna SIM inayopatikana.", Toast.LENGTH_LONG).show();
-            return;
-        }
-        try {
-            SubscriptionInfo selected = activeSubscriptions.get(simSpinner.getSelectedItemPosition());
-            SmsManager sms = getSystemService(SmsManager.class).createForSubscriptionId(selected.getSubscriptionId());
-            sms.sendTextMessage(recipient, null, message, null, null);
-            Toast.makeText(this, "SMS imetumwa kupitia SIM " + (selected.getSimSlotIndex() + 1), Toast.LENGTH_LONG).show();
-        } catch (Exception e) {
-            Toast.makeText(this, "SMS imeshindwa: " + e.getMessage(), Toast.LENGTH_LONG).show();
+                if (selected == null) return "{\"success\":false,\"error\":\"SIM " + (slotIndex + 1) + " haipatikani.\"}";
+                SmsManager sms = getSystemService(SmsManager.class).createForSubscriptionId(selected.getSubscriptionId());
+                sms.sendTextMessage(recipient, null, content, null, null);
+                return "{\"success\":true}";
+            } catch (Exception e) {
+                String message = e.getMessage() == null ? "SMS imeshindwa kutumwa." : e.getMessage().replace("\\", "\\\\").replace("\"", "\\\"");
+                return "{\"success\":false,\"error\":\"" + message + "\"}";
+            }
         }
     }
 
-    private void showAutoReply() {
-        content.removeAllViews();
-        content.addView(title("Auto Reply"));
-        TextView status = new TextView(this);
-        status.setText("Auto Reply ya Android\n\nSIM inayotumika kutuma majibu itawekwa kutoka kwenye SIM halisi za simu yako. Hakuna sample numbers.");
-        status.setTextSize(16);
-        status.setTextColor(0xFF222222);
-        status.setPadding(0, 0, 0, 20);
-        content.addView(status);
-
-        simSpinner = new Spinner(this);
-        content.addView(simSpinner, new LinearLayout.LayoutParams(-1, 60));
-        loadSims();
-
-        EditText reply = new EditText(this);
-        reply.setHint("Ujumbe wa Auto Reply");
-        reply.setMinHeight(100);
-        content.addView(reply, new LinearLayout.LayoutParams(-1, 110));
-
-        Button save = new Button(this);
-        save.setText("Hifadhi Auto Reply");
-        save.setAllCaps(false);
-        save.setOnClickListener(v -> Toast.makeText(this, "Mipangilio ya Auto Reply imeandaliwa kwa SIM halisi.", Toast.LENGTH_LONG).show());
-        content.addView(save, new LinearLayout.LayoutParams(-1, 56));
+    private void requestRuntimePermissions() {
+        if (Build.VERSION.SDK_INT >= 23) {
+            java.util.ArrayList<String> permissions = new java.util.ArrayList<>();
+            String[] wanted = new String[] {
+                    Manifest.permission.RECORD_AUDIO,
+                    Manifest.permission.CAMERA,
+                    Manifest.permission.READ_SMS,
+                    Manifest.permission.RECEIVE_SMS,
+                    Manifest.permission.SEND_SMS,
+                    Manifest.permission.READ_PHONE_STATE
+            };
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                permissions.add(Manifest.permission.READ_PHONE_NUMBERS);
+            }
+            for (String permission : wanted) {
+                if (checkSelfPermission(permission) != PackageManager.PERMISSION_GRANTED) permissions.add(permission);
+            }
+            java.util.LinkedHashSet<String> unique = new java.util.LinkedHashSet<>(permissions);
+            if (!unique.isEmpty()) requestPermissions(unique.toArray(new String[0]), REQUEST_PERMISSIONS);
+        }
     }
 
-    private void requestPermissionsIfNeeded() {
-        if (Build.VERSION.SDK_INT < 23) return;
-        ArrayList<String> p = new ArrayList<>();
-        String[] wanted = {Manifest.permission.SEND_SMS, Manifest.permission.READ_SMS, Manifest.permission.RECEIVE_SMS, Manifest.permission.READ_PHONE_STATE};
-        for (String x : wanted) if (checkSelfPermission(x) != PackageManager.PERMISSION_GRANTED) p.add(x);
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && checkSelfPermission(Manifest.permission.READ_PHONE_NUMBERS) != PackageManager.PERMISSION_GRANTED) p.add(Manifest.permission.READ_PHONE_NUMBERS);
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) p.add(Manifest.permission.POST_NOTIFICATIONS);
-        if (!p.isEmpty()) requestPermissions(p.toArray(new String[0]), PERMISSIONS);
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == FILE_CHOOSER && fileCallback != null) {
+            Uri[] result = WebChromeClient.FileChooserParams.parseResult(resultCode, data);
+            fileCallback.onReceiveValue(result);
+            fileCallback = null;
+        }
     }
 
-    @Override protected void onDestroy() {
-        executor.shutdownNow();
-        super.onDestroy();
+    @Override
+    public void onBackPressed() {
+        if (webView != null && webView.canGoBack()) webView.goBack();
+        else super.onBackPressed();
     }
 }
